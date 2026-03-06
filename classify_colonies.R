@@ -1,62 +1,69 @@
 # ==============================================================================
-# Script: Coral Colony Point Cloud Classification
-# Purpose: Classify LAS points by Colony ID using TagLab shapefiles
+# Script: 3D Point Cloud Genet Classification
+# Purpose: Assign Biological Genet IDs to LAS points using TagLab Shapefiles
 # Author: the-churn
 # ==============================================================================
 
-# Load required libraries
 library(lidR)
 library(sf)
+library(dplyr)
 
-# 1. LOAD DATA -----------------------------------------------------------------
-# Replace these paths with your local directory or relative paths
-las_path <- "D:/PhD_Data(Large)/01_Raw/TestStuff/1fps_Runthrough/2015_Data.las"
-shp_path <- "D:/PhD_Data(Large)/01_Raw/TestStuff/1fps_Runthrough/2015_regions.shp"
+# 1. PATH CONFIGURATION --------------------------------------------------------
+# Update these paths for 2015/2022 runs
+las_in      <- "D:/PhD_Data(Large)/01_Raw/TestStuff/1fps_Runthrough/2022_Data_Las.las"
+shp_in      <- "D:/PhD_Data(Large)/05_Code/Automating_3D_analysis/Shapes/2022_Shapes.shp"
+output_path <- "D:/PhD_Data(Large)/05_Code/Automating_3D_analysis/Master_Genet_2022.las"
 
-las <- readLAS(las_path)
-shapes <- st_read(shp_path)
+# 2. DATA IMPORT ---------------------------------------------------------------
+las    <- readLAS(las_in)
+shapes <- st_read(shp_in)
 
-# 2. SPATIAL PRE-PROCESSING ----------------------------------------------------
-# Apply a 1.5cm buffer to ensure the coral points are captured within 
-# the 2D digitized boundary.
-shapes_buffered <- st_buffer(shapes, dist = 0.015)
+# 3. SPATIAL PRE-PROCESSING & BUFFERING ----------------------------------------
+# We apply a 3cm buffer (0.03m) to capture leaning branches and peripheral 
+# growth that may fall outside the 2D orthomosaic footprint. 
+# We arrange by area so that smaller colonies aren't 'swallowed' by the 
+# buffers of larger neighbors during the spatial join.
 
-# Harmonize CRS: Force the LAS object to inherit the Coordinate Reference System
-# of the shapefile to ensure they overlap correctly during the spatial merge.
-st_crs(las) <- st_crs(shapes_buffered)
+shapes_to_merge <- shapes %>%
+  st_buffer(dist = 0.03) %>%
+  mutate(TL_Genet = as.integer(as.character(TL_Genet))) %>% # Force integer conversion
+  arrange(st_area(.)) %>% 
+  select(TL_Genet) # Drop extraneous columns to prevent merge conflicts
 
-# 3. SPATIAL JOIN (CLASSIFICATION) ---------------------------------------------
-# merge_spatial performs a point-in-polygon check. It adds a new column 
-# to the LAS data table based on the "TL_id" attribute in the shapefile.
-las <- merge_spatial(las, shapes_buffered, "TL_id")
+# Ensure CRS synchronization
+st_crs(las) <- st_crs(shapes_to_merge)
 
-# Clean up: Replace NA values (points outside any colony) with 0.
-# We use 0L to ensure it remains an integer type.
-las@data$TL_id[is.na(las@data$TL_id)] <- 0L
+# 4. SPATIAL MERGE (POINT-IN-POLYGON) ------------------------------------------
+# Map the 'TL_Genet' attribute to the 3D points
+las <- merge_spatial(las, shapes_to_merge, "TL_Genet")
 
-# 4. LAS ATTRIBUTE REGISTRATION ------------------------------------------------
-# To ensure CloudCompare and other software recognize 'TL_id' as a Scalar Field:
-# 1. Ensure the ID is a 32-bit integer.
-las@data$TL_id <- as.integer(las@data$TL_id)
+# Handle points outside of polygons (assign ID 0)
+las@data$TL_Genet[is.na(las@data$TL_Genet)] <- 0L
 
-# 2. Register 'TL_id' as an official LAS attribute (Extra Byte) in the header.
+# 5. HEADER REGISTRATION (EXTRA BYTES) -----------------------------------------
+# Ensure the new attribute is registered in the LAS header so it is 
+# visible as a Scalar Field in CloudCompare.
+
+genet_values <- as.integer(las@data$TL_Genet)
+
 las <- add_lasattribute(
   las, 
-  x = las@data$TL_id, 
-  name = "TL_id", 
-  desc = "Colony ID from TagLab"
+  x    = genet_values, 
+  name = "TL_Genet", 
+  desc = "Biological Genet ID"
 )
 
-# 3. Set the version to LAS 1.4 (Standard for supporting extra attributes).
+# Use LAS 1.4 to ensure full support for extra attributes
 las@header@version <- "1.4"
 
-# 5. EXPORT --------------------------------------------------------------------
-# Save the full classified cloud
-writeLAS(las, "D:/PhD_Data(Large)/02_Processed/2015_Classified_Full.las")
+# 6. EXPORT & VERIFICATION -----------------------------------------------------
+# Note: writeLAS may warn about missing EPSG codes if using local coordinates;
+# this can be ignored as long as the relative alignment is preserved.
 
-# OPTIONAL: Export a "Colonies Only" file for faster loading in CloudCompare
-# las_colonies <- filter_poi(las, TL_id > 0)
-# writeLAS(las_colonies, "D:/PhD_Data(Large)/02_Processed/2015_Colonies_Only.las")
+writeLAS(las, output_path)
 
-# Verify the result in the console
-summary(las@data$TL_id)
+# Print point distribution to console for QC
+print("--- Point Count per Genet ID ---")
+print(table(las@data$TL_Genet))
+
+cat("\nProcessing Complete. File saved to:", output_path)
